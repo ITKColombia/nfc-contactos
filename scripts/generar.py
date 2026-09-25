@@ -97,7 +97,7 @@ def vcard(a):
 def codigo(a):
     clave = (a["codigo"] or a["email"] or a["celular"]).strip().lower()
     if not clave:
-        sys.exit(f"ERROR: la fila {a['fila']} del CSV no tiene EMAIL, CELULAR ni CODIGO.")
+        return None
     d = hmac.new(secreto, clave.encode(), hashlib.sha256).digest()
     return base64.b32encode(d).decode().lower().rstrip("=")[:16]
 
@@ -118,11 +118,17 @@ if SITIO.exists():
     "<title>No encontrado</title>\n"
 )
 
-vistos, salida = set(), []
+vistos, salida, omitidas = set(), [], []
 for a in leer_csv(CSV_IN):
     c = codigo(a)
+    if not a["nombre"] or c is None:
+        print(f"::warning::Fila {a['fila']} omitida: le falta NOMBRE o (EMAIL/CELULAR/CODIGO).")
+        omitidas.append(a["fila"])
+        continue
     if c in vistos:
-        sys.exit(f"ERROR: la fila {a['fila']} está duplicada (mismo email/código que otra fila).")
+        print(f"::warning::Fila {a['fila']} omitida: duplicada (mismo email/código que otra fila).")
+        omitidas.append(a["fila"])
+        continue
     vistos.add(c)
     (SITIO / "c" / f"{c}.vcf").write_text(vcard(a), encoding="utf-8", newline="")
     salida.append([a["nombre"], a["email"], f"{base_url}/c/{c}.vcf"])
@@ -132,4 +138,6 @@ with LINKS.open("w", newline="", encoding="utf-8-sig") as f:
     w.writerow(["NOMBRE", "EMAIL", "LINK_NFC"])
     w.writerows(salida)
 
-print(f"OK: {len(salida)} contactos generados.")
+if not salida:
+    sys.exit("ERROR: no se generó ningún contacto. Revisa el CSV.")
+print(f"OK: {len(salida)} contactos generados. Filas omitidas: {omitidas or 'ninguna'}")
