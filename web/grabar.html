@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>Grabar tags NFC</title>
+<style>
+  :root{--bg:#f4f5f7;--card:#fff;--tx:#1b1f24;--mut:#6b7280;--pri:#ffcc00;--ok:#15803d;--err:#b91c1c;--bd:#e3e5e8}
+  @media (prefers-color-scheme:dark){:root{--bg:#121417;--card:#1c1f24;--tx:#eef0f3;--mut:#9aa3ad;--bd:#2c3139}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+  header{padding:16px;background:#1b1f24;color:#fff}
+  header h1{margin:0;font-size:1.15rem}
+  header p{margin:4px 0 0;font-size:.85rem;color:#c7ccd3}
+  main{padding:16px;max-width:720px;margin:auto}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:14px}
+  h2{font-size:1rem;margin:0 0 10px}
+  label{display:block;font-size:.8rem;color:var(--mut);margin:10px 0 4px}
+  input[type=password],input[type=text]{width:100%;padding:11px;border:1px solid var(--bd);border-radius:8px;font-size:1rem;background:var(--bg);color:var(--tx)}
+  button{border:0;border-radius:8px;padding:10px 12px;font-size:.95rem;font-weight:600;cursor:pointer;background:var(--bd);color:var(--tx)}
+  button.pri{background:var(--pri);color:#1b1f24}
+  .muted{color:var(--mut);font-size:.85rem}
+  .status{padding:10px;border-radius:8px;font-size:.9rem;margin-top:10px;display:none;white-space:pre-wrap}
+  .status.show{display:block}
+  .ok{background:#dcfce7;color:var(--ok)} .err{background:#fee2e2;color:var(--err)} .info{background:#fef9c3;color:#854d0e}
+  #buscar{margin-bottom:10px}
+  ul{list-style:none;padding:0;margin:0}
+  li{border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:8px}
+  li.done{opacity:.6}
+  li .n{font-weight:600}
+  li .l{font-size:.75rem;color:var(--mut);word-break:break-all;margin:4px 0 8px}
+  li .acc{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:.75rem;padding:2px 8px;border-radius:99px;background:var(--bd);margin-left:6px;font-weight:500}
+  .chip.ok{background:#dcfce7}
+</style>
+</head>
+<body>
+<header>
+  <h1>Grabar tags NFC</h1>
+  <p>Carga el CSV, escribe la clave y graba el link de cada asesor.</p>
+</header>
+<main>
+  <div class="card" id="soporte"></div>
+
+  <div class="card">
+    <h2>1. Clave y CSV</h2>
+    <label for="clave">Clave (NFC_SECRETO)</label>
+    <input type="password" id="clave" autocomplete="off" placeholder="La misma frase del secreto en GitHub">
+    <label for="csv">Archivo CSV de asesores</label>
+    <input type="file" id="csv" accept=".csv,.txt,text/csv">
+    <p class="muted">Nada se envía a ningún servidor: la clave y el CSV solo se usan en este celular.</p>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card" id="listaCard" style="display:none">
+    <h2>2. Asesores <span class="muted" id="prog"></span></h2>
+    <input type="text" id="buscar" placeholder="Buscar por nombre o email">
+    <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap">
+      <button id="descargar">Descargar listado de links (CSV)</button>
+      <button id="cancelar">Cancelar grabación</button>
+    </div>
+    <ul id="lista"></ul>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const nfc = 'NDEFReader' in window;
+let asesores = [], abort = null;
+
+$('soporte').innerHTML = nfc
+  ? '<b style="color:var(--ok)">✓ Este celular puede grabar tags.</b> <span class="muted">Mantén la pantalla encendida y acerca el tag a la parte trasera.</span>'
+  : '<b>Este navegador no graba NFC</b> <span class="muted">(solo Chrome en Android lo permite). Igual puedes copiar cada link y grabarlo con la app NFC Tools.</span>';
+
+function msg(t, tipo='info'){ const s=$('status'); s.textContent=t; s.className='status show '+tipo; }
+
+// ---- Mismo cálculo que scripts/generar.py ----
+function norm(s){ return s.normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^\x00-\x7f]/g,'').trim().toUpperCase(); }
+function parseCSV(text){
+  text=text.replace(/^﻿/,'');
+  const primera=text.split(/\r?\n/)[0];
+  const sep=[';',',','\t'].reduce((a,b)=>primera.split(b).length>primera.split(a).length?b:a);
+  const rows=[]; let row=[],cur='',q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){ if(c=='"'){ if(text[i+1]=='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else if(c=='"') q=true;
+    else if(c==sep){ row.push(cur); cur=''; }
+    else if(c=='\n'||c=='\r'){ if(c=='\r'&&text[i+1]=='\n') i++; row.push(cur); rows.push(row); row=[]; cur=''; }
+    else cur+=c;
+  }
+  if(cur||row.length){ row.push(cur); rows.push(row); }
+  return rows;
+}
+function b32(bytes){
+  const A='abcdefghijklmnopqrstuvwxyz234567'; let bits=0,val=0,out='';
+  for(const b of bytes){ val=(val<<8)|b; bits+=8; while(bits>=5){ out+=A[(val>>>(bits-5))&31]; bits-=5; } }
+  if(bits>0) out+=A[(val<<(5-bits))&31];
+  return out;
+}
+async function codigo(key, clave){
+  const sig=await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(clave));
+  return b32(new Uint8Array(sig)).slice(0,16);
+}
+
+async function procesar(){
+  const f=$('csv').files[0], secreto=$('clave').value;
+  if(!f) return;
+  if(secreto.length<16){ msg('Escribe la clave (mínimo 16 caracteres) antes de cargar el CSV.','err'); return; }
+  const filas=parseCSV(await f.text());
+  const h=filas[0].map(norm);
+  const col=(...ks)=>{ const i=h.findIndex(x=>ks.some(k=>x.includes(k))); return i<0?null:i; };
+  const idx={empresa:col('EMPRESA'),nombre:col('NOMBRE'),celular:col('CELULAR','TELEFONO'),email:col('EMAIL','CORREO'),codigo:col('CODIGO','ID')};
+  if(idx.nombre===null){ msg('No encontré la columna NOMBRE en la primera fila del CSV.','err'); return; }
+  const key=await crypto.subtle.importKey('raw', new TextEncoder().encode(secreto), {name:'HMAC',hash:'SHA-256'}, false, ['sign']);
+  const base=new URL('c/', location.href).href;
+  const vistos=new Set(); asesores=[];
+  for(const r of filas.slice(1)){
+    if(!r.some(v=>v.trim())) continue;
+    const g=k=>idx[k]!==null&&idx[k]<r.length?r[idx[k]].trim():'';
+    const a={nombre:g('nombre'),email:g('email'),celular:g('celular'),codigo:g('codigo')};
+    const clave=(a.codigo||a.email||a.celular).trim().toLowerCase();
+    if(!a.nombre||!clave) continue;
+    const c=await codigo(key, clave);
+    if(vistos.has(c)) continue;
+    vistos.add(c);
+    asesores.push({...a, link:base+c+'.html', grabado:false});
+  }
+  $('listaCard').style.display='block';
+  pintar();
+  // Verifica que la clave sea la correcta comprobando que el primer link exista.
+  if(asesores.length){
+    try{
+      const r=await fetch(asesores[0].link,{method:'HEAD',cache:'no-store'});
+      if(r.ok) msg(`✓ ${asesores.length} asesores cargados. La clave es correcta.`,'ok');
+      else msg(`Se cargaron ${asesores.length} asesores, pero los links no existen.\nRevisa que la clave sea exactamente la de GitHub y que ya hayas ejecutado "Run workflow" con este CSV.`,'err');
+    }catch(e){ msg(`${asesores.length} asesores cargados (no se pudo verificar el link).`,'info'); }
+  }
+}
+$('csv').addEventListener('change', procesar);
+$('clave').addEventListener('change', procesar);
+
+function pintar(){
+  const q=norm($('buscar').value||'');
+  $('prog').textContent=`(${asesores.filter(a=>a.grabado).length}/${asesores.length} grabados)`;
+  const ul=$('lista'); ul.innerHTML='';
+  asesores.forEach((a,i)=>{
+    if(q && !norm(a.nombre+' '+a.email).includes(q)) return;
+    const li=document.createElement('li'); if(a.grabado) li.className='done';
+    li.innerHTML=`<div class="n"></div><div class="l"></div><div class="acc">
+      ${nfc?'<button class="pri" data-a="grabar">Grabar tag</button>':''}
+      <button data-a="copiar">Copiar link</button><button data-a="abrir">Ver tarjeta</button></div>`;
+    li.querySelector('.n').textContent=a.nombre;
+    if(a.grabado) li.querySelector('.n').insertAdjacentHTML('beforeend','<span class="chip ok">✓ Grabado</span>');
+    li.querySelector('.l').textContent=a.link;
+    li.querySelectorAll('button').forEach(b=>b.onclick=()=>accion(b.dataset.a,i));
+    ul.appendChild(li);
+  });
+}
+$('buscar').addEventListener('input', pintar);
+
+async function accion(tipo,i){
+  const a=asesores[i];
+  if(tipo==='abrir') return window.open(a.link,'_blank');
+  if(tipo==='copiar'){
+    try{ await navigator.clipboard.writeText(a.link); msg('Link copiado: '+a.nombre,'ok'); }
+    catch{ prompt('Copia el link:', a.link); }
+    return;
+  }
+  try{
+    abort?.abort(); abort=new AbortController();
+    msg(`Acerca el tag para grabar a ${a.nombre}…`,'info');
+    await new NDEFReader().write({records:[{recordType:'url',data:a.link}]},{overwrite:true,signal:abort.signal});
+    a.grabado=true; navigator.vibrate?.(150);
+    msg(`✓ Tag grabado: ${a.nombre}`,'ok'); pintar();
+  }catch(e){
+    const m={AbortError:'Grabación cancelada.',NotAllowedError:'Permiso NFC denegado. Actívalo en la configuración del sitio en Chrome.',
+      NotSupportedError:'El tag no es compatible o está bloqueado.',NetworkError:'Se perdió contacto con el tag. Intenta de nuevo sin moverlo.'};
+    msg(m[e.name]||('Error: '+e.message),'err');
+  }
+}
+$('cancelar').onclick=()=>abort?.abort();
+
+$('descargar').onclick=()=>{
+  const q=v=>'"'+String(v).replace(/"/g,'""')+'"';
+  const csv='NOMBRE;EMAIL;LINK_NFC\r\n'+asesores.map(a=>[a.nombre,a.email,a.link].map(q).join(';')).join('\r\n');
+  const el=document.createElement('a');
+  el.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv'}));
+  el.download='links_para_nfc.csv'; el.click();
+};
+</script>
+</body>
+</html>
