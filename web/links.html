@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>Grabar links NFC</title>
+<style>
+  :root{--bg:#f4f5f7;--card:#fff;--tx:#1b1f24;--mut:#6b7280;--pri:#ffcc00;--ok:#15803d;--err:#b91c1c;--bd:#e3e5e8}
+  @media (prefers-color-scheme:dark){:root{--bg:#121417;--card:#1c1f24;--tx:#eef0f3;--mut:#9aa3ad;--bd:#2c3139}}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx)}
+  header{padding:16px;background:#1b1f24;color:#fff}
+  header h1{margin:0;font-size:1.15rem}
+  header p{margin:4px 0 0;font-size:.85rem;color:#c7ccd3}
+  main{padding:16px;max-width:720px;margin:auto}
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:14px}
+  h2{font-size:1rem;margin:0 0 10px}
+  label{display:block;font-size:.8rem;color:var(--mut);margin:10px 0 4px}
+  input[type=text],input[type=url]{width:100%;padding:11px;border:1px solid var(--bd);border-radius:8px;font-size:1rem;background:var(--bg);color:var(--tx)}
+  button{border:0;border-radius:8px;padding:10px 12px;font-size:.95rem;font-weight:600;cursor:pointer;background:var(--bd);color:var(--tx)}
+  button.pri{background:var(--pri);color:#1b1f24}
+  .muted{color:var(--mut);font-size:.85rem}
+  .status{padding:10px;border-radius:8px;font-size:.9rem;margin-top:10px;display:none;white-space:pre-wrap}
+  .status.show{display:block}
+  .ok{background:#dcfce7;color:var(--ok)} .err{background:#fee2e2;color:var(--err)} .info{background:#fef9c3;color:#854d0e}
+  ul{list-style:none;padding:0;margin:0}
+  li{border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:8px}
+  li.done{opacity:.6}
+  li .n{font-weight:600}
+  li .l{font-size:.75rem;color:var(--mut);word-break:break-all;margin:4px 0 8px}
+  li .acc{display:flex;gap:6px;flex-wrap:wrap}
+  .chip{font-size:.75rem;padding:2px 8px;border-radius:99px;background:#dcfce7;margin-left:6px;font-weight:500}
+</style>
+</head>
+<body>
+<header>
+  <h1>Grabar links NFC</h1>
+  <p>Links directos (YouTube, Instagram, web…): al tocar el tag se abre el link.</p>
+</header>
+<main>
+  <div class="card" id="soporte"></div>
+
+  <div class="card">
+    <h2>Cargar CSV</h2>
+    <p class="muted">Una columna con el nombre (NOMBRE o DESCRIPCION) y otra con el link (LINK o URL). También acepta varias columnas de links por fila, p. ej. YOUTUBE e INSTAGRAM.</p>
+    <input type="file" id="csv" accept=".csv,.txt,text/csv">
+    <div class="status" id="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>O escribir un link</h2>
+    <label for="manual">Link</label>
+    <input type="url" id="manual" placeholder="https://www.instagram.com/...">
+    <div style="margin-top:10px"><button class="pri" id="grabarManual">Grabar este link</button></div>
+  </div>
+
+  <div class="card" id="listaCard" style="display:none">
+    <h2>Links <span class="muted" id="prog"></span></h2>
+    <div style="margin-bottom:10px"><button id="cancelar">Cancelar grabación</button></div>
+    <ul id="lista"></ul>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const nfc = 'NDEFReader' in window;
+let items = [], abort = null;
+
+$('soporte').innerHTML = nfc
+  ? '<b style="color:var(--ok)">✓ Este celular puede grabar tags.</b> <span class="muted">Mantén la pantalla encendida y acerca el tag a la parte trasera.</span>'
+  : '<b>Este navegador no graba NFC</b> <span class="muted">(solo Chrome en Android). Puedes copiar cada link y grabarlo con NFC Tools.</span>';
+
+function msg(t,tipo='info'){ const s=$('status'); s.textContent=t; s.className='status show '+tipo; }
+function norm(s){ return s.normalize('NFD').replace(/[̀-ͯ]/g,'').trim().toUpperCase(); }
+function esLink(v){ return /^(https?:\/\/|www\.)/i.test(v.trim()); }
+function limpiar(v){ v=v.trim(); return /^www\./i.test(v) ? 'https://'+v : v; }
+
+function parseCSV(text){
+  text=text.replace(/^﻿/,'');
+  const primera=text.split(/\r?\n/)[0];
+  const sep=[';',',','\t'].reduce((a,b)=>primera.split(b).length>primera.split(a).length?b:a);
+  const rows=[]; let row=[],cur='',q=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(q){ if(c=='"'){ if(text[i+1]=='"'){cur+='"';i++;} else q=false; } else cur+=c; }
+    else if(c=='"') q=true;
+    else if(c==sep){ row.push(cur); cur=''; }
+    else if(c=='\n'||c=='\r'){ if(c=='\r'&&text[i+1]=='\n') i++; row.push(cur); rows.push(row); row=[]; cur=''; }
+    else cur+=c;
+  }
+  if(cur||row.length){ row.push(cur); rows.push(row); }
+  return rows.filter(r=>r.some(v=>v.trim()));
+}
+
+$('csv').addEventListener('change', async e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const filas=parseCSV(await f.text());
+  if(!filas.length){ msg('El CSV está vacío.','err'); return; }
+  // ¿La primera fila es encabezado? (si no contiene links, sí)
+  const conEnc=!filas[0].some(esLink);
+  const enc=conEnc ? filas[0].map(norm) : filas[0].map((_,i)=>'COL'+(i+1));
+  const datos=conEnc ? filas.slice(1) : filas;
+  const iNom=enc.findIndex(h=>/NOMBRE|DESCRIPCION|TITULO|NAME/.test(h));
+  items=[];
+  for(const r of datos){
+    const nombre = iNom>=0 ? (r[iNom]||'').trim() : '';
+    r.forEach((v,i)=>{
+      if(!esLink(v||'')) return;
+      const etiqueta=[nombre, conEnc && i!==iNom ? enc[i].charAt(0)+enc[i].slice(1).toLowerCase() : ''].filter(Boolean).join(' · ');
+      items.push({nombre: etiqueta || limpiar(v), link: limpiar(v), grabado:false});
+    });
+  }
+  if(!items.length){ msg('No encontré links (deben empezar por http://, https:// o www.).','err'); return; }
+  $('listaCard').style.display='block';
+  msg(`✓ ${items.length} links cargados.`,'ok');
+  pintar();
+});
+
+function pintar(){
+  $('prog').textContent=`(${items.filter(a=>a.grabado).length}/${items.length} grabados)`;
+  const ul=$('lista'); ul.innerHTML='';
+  items.forEach((a,i)=>{
+    const li=document.createElement('li'); if(a.grabado) li.className='done';
+    li.innerHTML=`<div class="n"></div><div class="l"></div><div class="acc">
+      ${nfc?'<button class="pri" data-a="grabar">Grabar tag</button>':''}
+      <button data-a="copiar">Copiar link</button><button data-a="abrir">Abrir</button></div>`;
+    li.querySelector('.n').textContent=a.nombre;
+    if(a.grabado) li.querySelector('.n').insertAdjacentHTML('beforeend','<span class="chip">✓ Grabado</span>');
+    li.querySelector('.l').textContent=a.link;
+    li.querySelectorAll('button').forEach(b=>b.onclick=()=>accion(b.dataset.a,a));
+    ul.appendChild(li);
+  });
+}
+
+async function grabar(link, nombre){
+  if(!nfc){ msg('Este navegador no graba NFC. Usa Chrome en Android o copia el link a NFC Tools.','err'); return false; }
+  try{
+    abort?.abort(); abort=new AbortController();
+    msg(`Acerca el tag para grabar: ${nombre}…`,'info');
+    await new NDEFReader().write({records:[{recordType:'url',data:link}]},{overwrite:true,signal:abort.signal});
+    navigator.vibrate?.(150);
+    msg(`✓ Tag grabado: ${nombre}`,'ok');
+    return true;
+  }catch(e){
+    const m={AbortError:'Grabación cancelada.',NotAllowedError:'Permiso NFC denegado. Actívalo en la configuración del sitio en Chrome.',
+      NotSupportedError:'El tag no es compatible o está bloqueado.',NetworkError:'Se perdió contacto con el tag o el link es muy largo para este tag.'};
+    msg(m[e.name]||('Error: '+e.message),'err');
+    return false;
+  }
+}
+
+async function accion(tipo,a){
+  if(tipo==='abrir') return window.open(a.link,'_blank');
+  if(tipo==='copiar'){
+    try{ await navigator.clipboard.writeText(a.link); msg('Link copiado.','ok'); }
+    catch{ prompt('Copia el link:', a.link); }
+    return;
+  }
+  if(await grabar(a.link, a.nombre)){ a.grabado=true; pintar(); }
+}
+
+$('grabarManual').onclick=()=>{
+  const v=limpiar($('manual').value);
+  if(!esLink(v)){ msg('Escribe un link que empiece por https://','err'); return; }
+  grabar(v, v);
+};
+$('cancelar').onclick=()=>abort?.abort();
+</script>
+</body>
+</html>
