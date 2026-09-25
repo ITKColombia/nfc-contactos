@@ -177,9 +177,9 @@ if SITIO.exists():
     "<title>No encontrado</title>\n"
 )
 
-grabar = RAIZ / "web" / "grabar.html"
-if grabar.exists():
-    shutil.copy(grabar, SITIO / "grabar.html")
+# Publica todas las páginas de la carpeta web/ (grabar.html, links.html, ...)
+for pagina in (RAIZ / "web").glob("*.html"):
+    shutil.copy(pagina, SITIO / pagina.name)
 
 vistos, salida, omitidas = set(), [], []
 for a in leer_csv(CSV_IN):
@@ -205,3 +205,4 @@ with LINKS.open("w", newline="", encoding="utf-8-sig") as f:
 if not salida:
     sys.exit("ERROR: no se generó ningún contacto. Revisa el CSV.")
 print(f"OK: {len(salida)} contactos generados. Filas omitidas: {omitidas or 'ninguna'}")
+
