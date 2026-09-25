@@ -1,0 +1,61 @@
+name: Publicar contactos NFC
+
+# Repo PÚBLICO: los datos de los asesores viven solo en el secreto ASESORES_CSV.
+# Se ejecuta a mano: Actions > Publicar contactos NFC > Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Generar archivos .vcf
+        env:
+          NFC_SECRETO: ${{ secrets.NFC_SECRETO }}
+          ASESORES_CSV: ${{ secrets.ASESORES_CSV }}
+          BASE_URL: ${{ steps.pages.outputs.base_url }}
+        run: python scripts/generar.py
+
+      # El listado asesor -> link se cifra con la clave NFC_SECRETO,
+      # porque en un repo público cualquiera podría descargar el artifact.
+      - name: Cifrar listado de links
+        env:
+          CLAVE: ${{ secrets.NFC_SECRETO }}
+        run: |
+          7z a -tzip -mem=AES256 -p"$CLAVE" links_para_nfc.zip links_para_nfc.csv > /dev/null
+          rm links_para_nfc.csv
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: links_para_nfc
+          path: links_para_nfc.zip
+          retention-days: 7
+
+      # Solo se publica la carpeta sitio/ (los .vcf). Nunca quedan en el repo.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: sitio
+
+      - id: deploy
+        uses: actions/deploy-pages@v4
