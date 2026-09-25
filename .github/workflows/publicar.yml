@@ -37,21 +37,6 @@ jobs:
           BASE_URL: ${{ steps.pages.outputs.base_url }}
         run: python scripts/generar.py
 
-      # El listado asesor -> link se cifra con la clave NFC_SECRETO,
-      # porque en un repo público cualquiera podría descargar el artifact.
-      - name: Cifrar listado de links
-        env:
-          CLAVE: ${{ secrets.NFC_SECRETO }}
-        run: |
-          7z a -tzip -mem=AES256 -p"$CLAVE" links_para_nfc.zip links_para_nfc.csv > /dev/null
-          rm links_para_nfc.csv
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: links_para_nfc
-          path: links_para_nfc.zip
-          retention-days: 7
-
       # Solo se publica la carpeta sitio/ (los .vcf). Nunca quedan en el repo.
       - uses: actions/upload-pages-artifact@v3
         with:
